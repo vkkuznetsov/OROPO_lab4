@@ -1,55 +1,68 @@
 import json
-
-import requests
+import asyncio
+import aiohttp
 from copy import deepcopy
 from neo4j import GraphDatabase
+from dotenv import load_dotenv
+import os
+import requests
 
-USER_ID_sec = "287263552"
+
+def load_config():
+    load_dotenv()
+    config = {
+        "TOKEN": os.getenv("TOKEN"),
+        "USER_ID": os.getenv("USER_ID"),
+        "URI": os.getenv("DB_URI"),
+        "USERNAME": os.getenv("DB_USERNAME"),
+        "PASSWORD": os.getenv("DB_PASSWORD"),
+    }
+    return config
 
 
-def get_followers(user_id, params, level):
-    """Получить фолловеров на указанном уровне"""
+async def get_followers(user_id, params, level, session, max_level=2):
+    url = "https://api.vk.com/method/users.getFollowers"
     params = deepcopy(params)
     params["user_id"] = user_id
-    url = "https://api.vk.com/method/users.getFollowers"
     params['fields'] = "sex,screen_name,city"
 
-    response = requests.get(url, params=params)
-    data = response.json()
-
-    followers = data.get("response", {}).get("items", [])
-
-    if level < 2:
+    async with session.get(url, params=params) as response:
+        data = await response.json()
+        followers = data.get("response", {}).get("items", [])
+    print(f'Запрос {user_id}')
+    if level <= max_level:
+        tasks = []
         for follower in followers:
             new_user_id = follower['id']
-            follower['followers'] = get_followers(new_user_id, params, level + 1)
-            follower['groups'] = get_subscriptions(new_user_id, params)
+            tasks.append(get_followers(new_user_id, params, level + 1, session, max_level))
+            follower['groups'] = await get_subscriptions(new_user_id, params, session)
+
+        followers_data = await asyncio.gather(*tasks)
+        for follower, data in zip(followers, followers_data):
+            follower['followers'] = data
 
     return followers
 
 
-def get_subscriptions(user_id, params):
-    """Получить подписки пользователя"""
+async def get_subscriptions(user_id, params, session):
+    url = "https://api.vk.com/method/users.getSubscriptions"
     params = deepcopy(params)
     params["user_id"] = user_id
-    url = "https://api.vk.com/method/users.getSubscriptions"
     params['extended'] = 1
 
-    response = requests.get(url, params=params)
-    data = response.json()
+    async with session.get(url, params=params) as response:
+        data = await response.json()
+        return data.get("response", {}).get("items", [])
 
-    return data.get("response", {}).get("items", [])
 
-
-def save_to_neo4j(followers_data, level=1, max_level=2):
+def save_to_neo4j(followers_data, config, max_level=3):
     """Сохраняет данные о пользователях, их фолловерах и группах в Neo4j, включая несколько уровней вложенности"""
-    uri = "bolt://localhost:7687"  # Адрес вашего Neo4j сервера
-    username = "neo4j"  # Имя пользователя
-    password = "postgres"  # Ваш пароль
+    uri = config["URI"]
+    username = config["USERNAME"]
+    password = config["PASSWORD"]
     driver = GraphDatabase.driver(uri, auth=(username, password))
 
     def create_user(tx, user_id, screen_name, full_name, sex, city):
-        """Создает пользователя в базе данных Neo4j"""
         query = (
             "MERGE (u:User {id: $user_id}) "
             "ON CREATE SET u.screen_name = $screen_name, "
@@ -58,7 +71,6 @@ def save_to_neo4j(followers_data, level=1, max_level=2):
         tx.run(query, user_id=user_id, screen_name=screen_name, full_name=full_name, sex=sex, city=city)
 
     def create_group(tx, group_id, group_name, screen_name):
-        """Создает группу в базе данных Neo4j"""
         query = (
             "MERGE (g:Group {id: $group_id}) "
             "ON CREATE SET g.name = $group_name, g.screen_name = $screen_name"
@@ -66,7 +78,6 @@ def save_to_neo4j(followers_data, level=1, max_level=2):
         tx.run(query, group_id=group_id, group_name=group_name, screen_name=screen_name)
 
     def create_follow_relation(tx, follower_id, followed_id):
-        """Создает связь Follow между пользователями"""
         query = (
             "MATCH (f:User {id: $follower_id}), (t:User {id: $followed_id}) "
             "MERGE (f)-[:FOLLOW]->(t)"
@@ -74,7 +85,6 @@ def save_to_neo4j(followers_data, level=1, max_level=2):
         tx.run(query, follower_id=follower_id, followed_id=followed_id)
 
     def create_subscribe_relation(tx, subscriber_id, subscribed_id):
-        """Создает связь Subscribe между пользователем и группой"""
         query = (
             "MATCH (s:User {id: $subscriber_id}), (g:Group {id: $subscribed_id}) "
             "MERGE (s)-[:SUBSCRIBE]->(g)"
@@ -103,7 +113,7 @@ def save_to_neo4j(followers_data, level=1, max_level=2):
 
                 session.execute_write(create_follow_relation, follower_id, user_id)
 
-                if current_level < max_level:
+                if current_level <= max_level:
                     process_user(follower, current_level + 1)
 
             for group in user_data.get('groups', []):
@@ -127,20 +137,24 @@ def save_to_json(data, filename):
     return filename
 
 
-if __name__ == "__main__":
-    TOKEN = TOKEN_sec
-    USER_ID = USER_ID_sec
+async def main():
+    config = load_config()
 
     print("Starting requests...")
 
     params = {
         "v": "5.199",
-        "access_token": TOKEN,
+        "access_token": config["TOKEN"],
     }
 
-    followers_data = get_followers(USER_ID, params, level=0)
+    async with aiohttp.ClientSession() as session:
+        followers_data = await get_followers(config["USER_ID"], params, level=0, session=session, max_level=1)
 
     save_to_json(followers_data, 'new_data.json')
-    save_to_neo4j(followers_data)
+    save_to_neo4j(followers_data, config, max_level=1)
 
     print("Finished.")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
