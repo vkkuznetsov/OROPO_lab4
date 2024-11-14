@@ -1,11 +1,13 @@
-import json
 import asyncio
 import aiohttp
 from copy import deepcopy
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
 import os
-import requests
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
 
 def load_config():
@@ -26,10 +28,15 @@ async def get_followers(user_id, params, level, session, max_level=2):
     params["user_id"] = user_id
     params['fields'] = "sex,screen_name,city"
 
-    async with session.get(url, params=params) as response:
-        data = await response.json()
-        followers = data.get("response", {}).get("items", [])
-    print(f'Запрос {user_id}')
+    try:
+        async with session.get(url, params=params) as response:
+            data = await response.json()
+            followers = data.get("response", {}).get("items", [])
+            logger.info(f"Получены фолловеры для user_id={user_id} на уровне {level}")
+    except Exception as e:
+        logger.error(f"Ошибка при получении фолловеров для user_id={user_id}: {e}")
+        return []
+
     if level <= max_level:
         tasks = []
         for follower in followers:
@@ -50,9 +57,14 @@ async def get_subscriptions(user_id, params, session):
     params["user_id"] = user_id
     params['extended'] = 1
 
-    async with session.get(url, params=params) as response:
-        data = await response.json()
-        return data.get("response", {}).get("items", [])
+    try:
+        async with session.get(url, params=params) as response:
+            data = await response.json()
+            logger.info(f"Получены подписки для user_id={user_id}")
+            return data.get("response", {}).get("items", [])
+    except Exception as e:
+        logger.error(f"Ошибка при получении подписок для user_id={user_id}: {e}")
+        return []
 
 
 def save_to_neo4j(followers_data, config, max_level=3):
@@ -100,6 +112,7 @@ def save_to_neo4j(followers_data, config, max_level=3):
             city = user_data.get('city', {}).get('title', '') if user_data.get('city') else ''
 
             session.execute_write(create_user, user_id, screen_name, full_name, sex, city)
+            logger.debug(f"Пользователь {user_id} добавлен в Neo4j")
 
             for follower in user_data.get('followers', []):
                 follower_id = follower['id']
@@ -110,8 +123,8 @@ def save_to_neo4j(followers_data, config, max_level=3):
 
                 session.execute_write(create_user, follower_id, follower_screen_name, follower_full_name, follower_sex,
                                       follower_city)
-
                 session.execute_write(create_follow_relation, follower_id, user_id)
+                logger.debug(f"Отношение FOLLOW между {follower_id} и {user_id} создано")
 
                 if current_level <= max_level:
                     process_user(follower, current_level + 1)
@@ -122,25 +135,19 @@ def save_to_neo4j(followers_data, config, max_level=3):
                 group_screen_name = group.get('screen_name', '')
 
                 session.execute_write(create_group, group_id, group_name, group_screen_name)
-
                 session.execute_write(create_subscribe_relation, user_id, group_id)
+                logger.debug(f"Отношение SUBSCRIBE между {user_id} и группой {group_id} создано")
 
         for user in followers_data:
             process_user(user, 1)
 
     driver.close()
-
-
-def save_to_json(data, filename):
-    with open(filename, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
-    return filename
+    logger.info("Сохранение данных в Neo4j завершено")
 
 
 async def main():
     config = load_config()
-
-    print("Starting requests...")
+    logger.info("Запуск программы")
 
     params = {
         "v": "5.199",
@@ -150,10 +157,8 @@ async def main():
     async with aiohttp.ClientSession() as session:
         followers_data = await get_followers(config["USER_ID"], params, level=0, session=session, max_level=1)
 
-    save_to_json(followers_data, 'new_data.json')
     save_to_neo4j(followers_data, config, max_level=1)
-
-    print("Finished.")
+    logger.info("Программа завершена")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 # Установка
 1. Клонируем репозиторий
 ```bash
-git clone https://github.com/vkkuznetsov/OROPO_lab3.git
+git clone https://github.com/vkkuznetsov/OROPO_lab4.git
 ```
 2. Переходим в папку с проектом
 ```bash
@@ -67,8 +67,5 @@ WHERE (u2)-[:FOLLOW]->(u1)
 RETURN u1.id AS user1_id, u2.id AS user2_id
 ```
 Использование  
-1. Вводим токен от vk api
-2. Вводим айди пользователя (по умолчанию уже стоит)
-3. Файлы сохраняются в корень проекта followers.json, friends.json, groups.json 
-еще плюсом выводятся пути до файлов
-4. Открываем файлы любым удобным способом
+1. Открываем .env файл и вписываем данные
+2. Запускаем
